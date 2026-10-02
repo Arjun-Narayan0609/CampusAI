@@ -6,7 +6,8 @@ Always returns the SAME shape:
   "context": str,           # chunks joined, each prefixed with [document p.N]
   "sources": [{"document","category","page","score"}],
   "query":   str,
-  "filters": {...}
+  "filters": {...},
+  "best_score": float | None   # top similarity seen (for tuning/debug; ignore in the agent)
 }
 """
 from config import TOP_K, MIN_SCORE, ALL
@@ -28,15 +29,17 @@ def _build_where(department, semester, subject):
     return conds[0] if len(conds) == 1 else {"$and": conds}
 
 
-def _empty(query, filters):
-    return {"found": False, "context": "", "sources": [], "query": query, "filters": filters}
+def _empty(query, filters, best=None):
+    return {"found": False, "context": "", "sources": [], "query": query, "filters": filters,
+            "best_score": best}
 
 
 def retrieve_context(query: str, department: str | None = None,
                      semester: int | None = None, subject: str | None = None,
                      k: int = TOP_K) -> dict:
     filters = {"department": department, "semester": semester, "subject": subject}
-    if not query or not query.strip():
+    query = " ".join((query or "").split())[:500]     # collapse whitespace, cap length
+    if len(query) < 2:                                # empty / meaningless query
         return _empty(query, filters)
 
     col = get_collection()
@@ -53,10 +56,11 @@ def retrieve_context(query: str, department: str | None = None,
         {"text": d, "metadata": m, "score": 1.0 - dist}   # cosine distance -> similarity
         for d, m, dist in zip(res["documents"][0], res["metadatas"][0], res["distances"][0])
     ]
+    best = round(hits[0]["score"], 3) if hits else None
     if not hits or hits[0]["score"] < MIN_SCORE:           # grounding rule: weak evidence = none
-        return _empty(query, filters)
+        return _empty(query, filters, best)
 
     hits = [h for h in hits if h["score"] >= MIN_SCORE]
     context = "\n\n".join(f'[{h["metadata"]["document"]} p.{h["metadata"]["page"]}]\n{h["text"]}' for h in hits)
     return {"found": True, "context": context, "sources": build_sources(hits),
-            "query": query, "filters": filters}
+            "query": query, "filters": filters, "best_score": best}

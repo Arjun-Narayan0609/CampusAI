@@ -561,11 +561,6 @@ class TestOtherRoutesUnchanged(unittest.TestCase):
         result = study_plan_node(state)
         self.assertIs(result, state)
 
-    def test_schedule_still_passthrough(self) -> None:
-        state = _base_state()
-        result = schedule_node(state)
-        self.assertIs(result, state)
-
     def test_general_still_passthrough(self) -> None:
         state = _base_state()
         result = general_node(state)
@@ -743,13 +738,11 @@ class TestReviewerIntegrationInGraph(unittest.TestCase):
         """Remaining placeholder routes receive appropriate fallbacks from reviewer."""
         from agents.reviewer import (
             FALLBACK_GENERAL,
-            FALLBACK_SCHEDULE,
             FALLBACK_STUDY_PLAN,
         )
 
         for intent, expected_fallback in [
             ("STUDY_PLAN", FALLBACK_STUDY_PLAN),
-            ("SCHEDULE", FALLBACK_SCHEDULE),
             ("GENERAL", FALLBACK_GENERAL),
         ]:
             with self.subTest(intent=intent):
@@ -764,6 +757,13 @@ class TestReviewerIntegrationInGraph(unittest.TestCase):
         state = _base_state(intent="CGPA", tool_result=None, answer="Unsupported answer")
         result = reviewer_node(state)
         self.assertEqual(result["answer"], FALLBACK_CGPA)
+
+    def test_schedule_missing_tool_result_triggers_fallback_in_reviewer(self) -> None:
+        """When SCHEDULE state is missing tool_result, reviewer applies FALLBACK_SCHEDULE."""
+        from agents.reviewer import FALLBACK_SCHEDULE
+        state = _base_state(intent="SCHEDULE", tool_result=None, answer="Unsupported answer")
+        result = reviewer_node(state)
+        self.assertEqual(result["answer"], FALLBACK_SCHEDULE)
 
 
 class TestCgpaNodeIntegration(unittest.TestCase):
@@ -889,6 +889,154 @@ class TestCgpaNodeIntegration(unittest.TestCase):
         self.assertIn("not found", result["answer"].lower())
 
 
+class TestScheduleNodeIntegration(unittest.TestCase):
+    """Focused integration tests for the deterministic Schedule capability node."""
+
+    def setUp(self) -> None:
+        _execution_log.clear()
+
+    def test_schedule_node_valid_request(self) -> None:
+        """1. test_schedule_node_valid_request: Valid request reaches real scheduler, populates tool_result and answer, preserves state."""
+        from unittest.mock import patch
+
+        mock_sessions = [
+            {
+                "id": 1,
+                "student_id": "24CSE001",
+                "subject": "Database Management Systems",
+                "date": "2026-10-05",
+                "start_time": "18:00",
+                "end_time": "19:00",
+                "duration_min": 60,
+                "status": "planned",
+                "note": "",
+            }
+        ]
+        with patch("agents.graph.get_schedule", return_value=mock_sessions) as mock_gs:
+            state = _base_state(student_id="24CSE001", question="Show my schedule", intent="SCHEDULE")
+            result = schedule_node(state)
+
+            mock_gs.assert_called_once()
+            self.assertIsNotNone(result.get("tool_result"))
+            self.assertTrue(result["tool_result"]["ok"])
+            self.assertEqual(result["tool_result"]["sessions"], mock_sessions)
+            self.assertIsNotNone(result.get("answer"))
+            self.assertIn("Database Management Systems", result["answer"])
+            self.assertIn("1 session(s) scheduled", result["answer"])
+            # Core fields preserved
+            self.assertEqual(result["student_id"], "24CSE001")
+            self.assertEqual(result["question"], "Show my schedule")
+            self.assertEqual(result["intent"], "SCHEDULE")
+
+    def test_schedule_node_unknown_student(self) -> None:
+        """2. test_schedule_node_unknown_student: Unknown student handled safely, no fabricated schedule, no crash."""
+        from unittest.mock import patch
+        from student.registry import StudentNotFoundError
+
+        with patch("agents.graph.get_student_profile", side_effect=StudentNotFoundError("Unknown student ID: 'UNKNOWN999'")):
+            state = _base_state(student_id="UNKNOWN999", question="Show my schedule", intent="SCHEDULE")
+            result = schedule_node(state)
+
+            self.assertIsNotNone(result.get("tool_result"))
+            self.assertFalse(result["tool_result"]["ok"])
+            self.assertIn("error", result["tool_result"])
+            self.assertIn("not found", result["answer"].lower())
+            # Ensure no schedule sessions were fabricated
+            self.assertNotIn("session(s) scheduled", result["answer"])
+            self.assertEqual(result["student_id"], "UNKNOWN999")
+            self.assertEqual(result["question"], "Show my schedule")
+            self.assertEqual(result["intent"], "SCHEDULE")
+
+    def test_schedule_tool_result_propagation(self) -> None:
+        """3. test_schedule_tool_result_propagation: Exact result returned by deterministic scheduler reaches tool_result."""
+        from unittest.mock import patch
+
+        expected_res = {
+            "tool": "modify_schedule",
+            "unavailable_date": "2026-10-07",
+            "moved": [
+                {
+                    "from": {"id": 1, "subject": "DBMS", "date": "2026-10-07"},
+                    "to": {"id": 1, "subject": "DBMS", "date": "2026-10-08"},
+                }
+            ],
+            "failed": [],
+            "schedule": [{"id": 1, "subject": "DBMS", "date": "2026-10-08"}],
+        }
+        with patch("agents.graph.modify_schedule", return_value=expected_res) as mock_ms:
+            state = _base_state(
+                student_id="24CSE001",
+                intent="SCHEDULE",
+                action="modify_schedule",
+                unavailable_date="2026-10-07",
+            )
+            result = schedule_node(state)
+
+            mock_ms.assert_called_once_with("24CSE001", unavailable_date="2026-10-07", move_to_date=None)
+            self.assertEqual(result["tool_result"], expected_res)
+            self.assertIn("Rescheduled 1 session(s)", result["answer"])
+
+    def test_schedule_failure_handled_safely(self) -> None:
+        """4. test_schedule_failure_handled_safely: Expected scheduler failure handled without crashing or claiming success."""
+        from unittest.mock import patch
+        from tools.scheduler import ScheduleConflictError
+
+        with patch("agents.graph.modify_schedule", side_effect=ScheduleConflictError("Session overlaps existing slot")):
+            state = _base_state(
+                student_id="24CSE001",
+                intent="SCHEDULE",
+                question="I cannot study Wednesday",
+            )
+            result = schedule_node(state)
+
+            self.assertIsNotNone(result.get("tool_result"))
+            self.assertFalse(result["tool_result"]["ok"])
+            self.assertIn("Session overlaps existing slot", result["tool_result"]["error"])
+            self.assertIn("Could not modify schedule", result["answer"])
+            self.assertNotIn("Rescheduled", result["answer"])
+
+    def test_full_graph_routing_schedule(self) -> None:
+        """5. test_full_graph_routing_schedule: Graph with intent='SCHEDULE' routes to schedule_node and reviewer validates."""
+        from unittest.mock import patch
+
+        mock_sessions = [
+            {
+                "id": 2,
+                "student_id": "24CSE001",
+                "subject": "Computer Networks",
+                "date": "2026-10-06",
+                "start_time": "19:00",
+                "end_time": "20:00",
+                "duration_min": 60,
+                "status": "planned",
+                "note": "",
+            }
+        ]
+        with patch("agents.graph.get_schedule", return_value=mock_sessions):
+            compiled = build_graph(analyzer_fn=_make_fake_analyzer("SCHEDULE"))
+            result = compiled.invoke(_base_state(student_id="24CSE001", question="What is my schedule?"))
+
+        self.assertEqual(result["intent"], "SCHEDULE")
+        self.assertIsNotNone(result.get("tool_result"))
+        self.assertTrue(result["tool_result"]["ok"])
+        self.assertEqual(result["tool_result"]["sessions"], mock_sessions)
+        self.assertIn("Computer Networks", result["answer"])
+        self.assertEqual(result["student_id"], "24CSE001")
+
+    def test_full_graph_unknown_student_schedule(self) -> None:
+        """6. test_full_graph_unknown_student_schedule: Unknown student reaches reviewer safely with no hallucinated schedule."""
+        from unittest.mock import patch
+        from student.registry import StudentNotFoundError
+
+        with patch("agents.graph.get_student_profile", side_effect=StudentNotFoundError("Unknown student ID: 'UNKNOWN'")):
+            compiled = build_graph(analyzer_fn=_make_fake_analyzer("SCHEDULE"))
+            result = compiled.invoke(_base_state(student_id="UNKNOWN", question="What is my timetable?"))
+
+        self.assertEqual(result["intent"], "SCHEDULE")
+        self.assertFalse(result["tool_result"]["ok"])
+        self.assertIn("not found", result["answer"].lower())
+        self.assertNotIn("session(s) scheduled", result["answer"])
+
+
 if __name__ == "__main__":
     unittest.main()
-

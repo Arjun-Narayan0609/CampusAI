@@ -522,6 +522,33 @@ class TestRagNodeStudentProfileFilters(unittest.TestCase):
             semester=None,
         )
 
+    def test_unknown_student_raises_not_found_handled_gracefully(self) -> None:
+        """When student profile raises StudentNotFoundError, department/semester are None and graph does not crash."""
+        from unittest.mock import patch
+        from student.registry import StudentNotFoundError
+
+        fake_retrieval = {
+            "found": False, "context": "", "sources": [],
+            "query": "test", "filters": {}, "best_score": None,
+        }
+
+        with patch("agents.graph.retrieve_context", return_value=fake_retrieval) as mock_rc, \
+             patch("agents.graph.get_student_profile", side_effect=StudentNotFoundError("Unknown student ID: 'UNKNOWN999'")):
+
+            result = rag_node({
+                "student_id": "UNKNOWN999",
+                "question": "test",
+                "intent": "ACADEMIC_QUERY",
+            })
+
+        mock_rc.assert_called_once_with(
+            query="test",
+            department=None,
+            semester=None,
+        )
+        self.assertEqual(result["context"], "")
+        self.assertEqual(result["sources"], [])
+
 
 class TestOtherRoutesUnchanged(unittest.TestCase):
     """TEST 5: Non-RAG routes remain placeholder pass-throughs."""
@@ -588,6 +615,45 @@ class TestRagNodeInGraph(unittest.TestCase):
         self.assertEqual(result["context"], "Some curriculum context.")
         self.assertEqual(result["answer"], "Grounded answer from LLM.")
         self.assertEqual(result["student_id"], "24CSE001")
+
+    def test_unknown_student_in_full_graph_completes_without_error(self) -> None:
+        """End-to-end: An unknown student ID in ACADEMIC_QUERY does not crash the compiled graph."""
+        from unittest.mock import MagicMock, patch
+        from student.registry import StudentNotFoundError
+
+        fake_retrieval = {
+            "found": True,
+            "context": "Context for general query.",
+            "sources": [{"document": "general.pdf", "page": 1, "score": 0.85}],
+            "query": "test q", "filters": {}, "best_score": 0.85,
+        }
+        mock_llm_response = MagicMock()
+        mock_llm_response.content = "Answer without student filtering."
+
+        with patch("agents.graph.retrieve_context", return_value=fake_retrieval) as mock_rc, \
+             patch("agents.graph.get_student_profile", side_effect=StudentNotFoundError("Unknown student")):
+
+            with patch("agents.graph.get_groq_llm") as mock_llm_factory, \
+                 patch("agents.graph.get_rag_chat_prompt") as mock_prompt_factory:
+
+                mock_prompt = MagicMock()
+                mock_chain = MagicMock()
+                mock_chain.invoke.return_value = mock_llm_response
+                mock_prompt.__or__ = MagicMock(return_value=mock_chain)
+                mock_prompt_factory.return_value = mock_prompt
+                mock_llm_factory.return_value = MagicMock()
+
+                compiled = build_graph(analyzer_fn=_make_fake_analyzer("ACADEMIC_QUERY"))
+                result = compiled.invoke(_base_state(student_id="UNKNOWN_SID", question="test q"))
+
+        mock_rc.assert_called_once_with(
+            query="test q",
+            department=None,
+            semester=None,
+        )
+        self.assertEqual(result["intent"], "ACADEMIC_QUERY")
+        self.assertEqual(result["answer"], "Answer without student filtering.")
+        self.assertEqual(result["student_id"], "UNKNOWN_SID")
 
 
 class TestReviewerIntegrationInGraph(unittest.TestCase):

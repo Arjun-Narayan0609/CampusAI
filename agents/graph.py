@@ -35,7 +35,7 @@ from agents.state import AgentState
 from llm.groq import get_groq_llm
 from rag.prompts import NOT_FOUND_MESSAGE, get_rag_chat_prompt
 from rag.retriever import retrieve_context
-from student.registry import get_student_profile
+from student.registry import StudentNotFoundError, get_student_profile
 
 # ---------------------------------------------------------------------------
 # Route identifier → graph node name mapping
@@ -70,7 +70,11 @@ def rag_node(state: AgentState) -> AgentState:
     # --- Student profile for optional filters ---
     department = None
     semester = None
-    profile = get_student_profile(student_id)
+    try:
+        profile = get_student_profile(student_id)
+    except StudentNotFoundError:
+        profile = None
+
     if profile:
         department = profile.get("department")
         semester = profile.get("semester")

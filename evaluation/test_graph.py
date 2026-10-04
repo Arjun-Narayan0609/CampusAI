@@ -376,5 +376,330 @@ class TestRouteToNodeMapping(unittest.TestCase):
             self.assertEqual(node, node.lower(), f"Node name for {route} should be lowercase")
 
 
+# ===========================================================================
+# J. RAG Integration Tests (mocked — no live API calls)
+# ===========================================================================
+
+
+class TestRagNodeFoundTrue(unittest.TestCase):
+    """TEST 2: RAG returns found=True — context, sources, and LLM answer reach state."""
+
+    def setUp(self) -> None:
+        _execution_log.clear()
+
+    def test_rag_found_true_populates_state(self) -> None:
+        """When RAG finds evidence, context/sources/answer should be set."""
+        from unittest.mock import MagicMock, patch
+
+        fake_retrieval = {
+            "found": True,
+            "context": "Semester 5 CSE has subjects: DBMS, OS.",
+            "sources": [{"document": "curriculum__CSE__5.pdf", "page": 1, "score": 0.92}],
+            "query": "What are the subjects in semester 5?",
+            "filters": {"department": "CSE", "semester": 5, "subject": None},
+            "best_score": 0.92,
+        }
+        fake_profile = {"student_id": "STU001", "name": "Alex Rivera",
+                        "department": "Computer Science", "semester": 4,
+                        "year": 2, "cgpa": 8.45}
+        mock_llm_response = MagicMock()
+        mock_llm_response.content = "The subjects in semester 5 for CSE are DBMS and OS."
+
+        with patch("agents.graph.retrieve_context", return_value=fake_retrieval) as mock_rc, \
+             patch("agents.graph.get_student_profile", return_value=fake_profile), \
+             patch("agents.graph.get_groq_llm") as mock_llm_factory, \
+             patch("agents.graph.get_rag_chat_prompt") as mock_prompt_factory:
+
+            # Set up the chain mock: prompt | llm
+            mock_prompt = MagicMock()
+            mock_llm = MagicMock()
+            mock_chain = MagicMock()
+            mock_chain.invoke.return_value = mock_llm_response
+            mock_prompt.__or__ = MagicMock(return_value=mock_chain)
+            mock_prompt_factory.return_value = mock_prompt
+            mock_llm_factory.return_value = mock_llm
+
+            result = rag_node({
+                "student_id": "STU001",
+                "question": "What are the subjects in semester 5?",
+                "intent": "ACADEMIC_QUERY",
+            })
+
+        self.assertEqual(result["context"], "Semester 5 CSE has subjects: DBMS, OS.")
+        self.assertEqual(result["sources"], [{"document": "curriculum__CSE__5.pdf", "page": 1, "score": 0.92}])
+        self.assertEqual(result["answer"], "The subjects in semester 5 for CSE are DBMS and OS.")
+        self.assertEqual(result["student_id"], "STU001")
+        self.assertEqual(result["question"], "What are the subjects in semester 5?")
+        self.assertEqual(result["intent"], "ACADEMIC_QUERY")
+
+
+class TestRagNodeFoundFalse(unittest.TestCase):
+    """TEST 3: RAG returns found=False — no LLM call, bounded answer."""
+
+    def test_rag_found_false_no_llm_call(self) -> None:
+        """When RAG finds no evidence, LLM must NOT be called."""
+        from unittest.mock import patch
+
+        from rag.prompts import NOT_FOUND_MESSAGE
+
+        fake_retrieval = {
+            "found": False,
+            "context": "",
+            "sources": [],
+            "query": "What is the canteen menu?",
+            "filters": {"department": None, "semester": None, "subject": None},
+            "best_score": None,
+        }
+
+        with patch("agents.graph.retrieve_context", return_value=fake_retrieval), \
+             patch("agents.graph.get_student_profile", return_value=None), \
+             patch("agents.graph.get_groq_llm") as mock_llm_factory:
+
+            result = rag_node({
+                "student_id": "UNKNOWN",
+                "question": "What is the canteen menu?",
+                "intent": "ACADEMIC_QUERY",
+            })
+
+        # LLM factory must NOT have been called
+        mock_llm_factory.assert_not_called()
+
+        self.assertEqual(result["context"], "")
+        self.assertEqual(result["sources"], [])
+        self.assertEqual(result["answer"], NOT_FOUND_MESSAGE)
+
+
+class TestRagNodeStudentProfileFilters(unittest.TestCase):
+    """TEST 4: Student profile department/semester are passed to retrieve_context."""
+
+    def test_profile_filters_forwarded(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        fake_profile = {"student_id": "STU003", "name": "Charlie Das",
+                        "department": "Electronics and Communication", "semester": 2,
+                        "year": 1, "cgpa": 7.80}
+        fake_retrieval = {
+            "found": False, "context": "", "sources": [],
+            "query": "test", "filters": {}, "best_score": None,
+        }
+
+        with patch("agents.graph.retrieve_context", return_value=fake_retrieval) as mock_rc, \
+             patch("agents.graph.get_student_profile", return_value=fake_profile):
+
+            rag_node({
+                "student_id": "STU003",
+                "question": "test",
+                "intent": "ACADEMIC_QUERY",
+            })
+
+        mock_rc.assert_called_once_with(
+            query="test",
+            department="Electronics and Communication",
+            semester=2,
+        )
+
+    def test_no_profile_passes_none_filters(self) -> None:
+        """When student profile is not found, department/semester should be None."""
+        from unittest.mock import patch
+
+        fake_retrieval = {
+            "found": False, "context": "", "sources": [],
+            "query": "test", "filters": {}, "best_score": None,
+        }
+
+        with patch("agents.graph.retrieve_context", return_value=fake_retrieval) as mock_rc, \
+             patch("agents.graph.get_student_profile", return_value=None):
+
+            rag_node({
+                "student_id": "NONEXISTENT",
+                "question": "test",
+                "intent": "ACADEMIC_QUERY",
+            })
+
+        mock_rc.assert_called_once_with(
+            query="test",
+            department=None,
+            semester=None,
+        )
+
+
+class TestOtherRoutesUnchanged(unittest.TestCase):
+    """TEST 5: Non-RAG routes remain placeholder pass-throughs."""
+
+    def setUp(self) -> None:
+        _execution_log.clear()
+
+    def test_study_plan_still_passthrough(self) -> None:
+        state = _base_state()
+        result = study_plan_node(state)
+        self.assertIs(result, state)
+
+    def test_cgpa_still_passthrough(self) -> None:
+        state = _base_state()
+        result = cgpa_node(state)
+        self.assertIs(result, state)
+
+    def test_schedule_still_passthrough(self) -> None:
+        state = _base_state()
+        result = schedule_node(state)
+        self.assertIs(result, state)
+
+    def test_general_still_passthrough(self) -> None:
+        state = _base_state()
+        result = general_node(state)
+        self.assertIs(result, state)
+
+
+class TestRagNodeInGraph(unittest.TestCase):
+    """TEST 1: ACADEMIC_QUERY reaches the RAG node within the full graph."""
+
+    def setUp(self) -> None:
+        _execution_log.clear()
+
+    def test_academic_query_reaches_rag_in_full_graph(self) -> None:
+        """End-to-end: ACADEMIC_QUERY routes through rag_node in the compiled graph."""
+        from unittest.mock import MagicMock, patch
+
+        fake_retrieval = {
+            "found": True,
+            "context": "Some curriculum context.",
+            "sources": [{"document": "doc.pdf", "page": 1, "score": 0.9}],
+            "query": "test q", "filters": {}, "best_score": 0.9,
+        }
+        mock_llm_response = MagicMock()
+        mock_llm_response.content = "Grounded answer from LLM."
+
+        with patch("agents.graph.retrieve_context", return_value=fake_retrieval), \
+             patch("agents.graph.get_student_profile", return_value=None), \
+             patch("agents.graph.get_groq_llm") as mock_llm_factory, \
+             patch("agents.graph.get_rag_chat_prompt") as mock_prompt_factory:
+
+            mock_prompt = MagicMock()
+            mock_chain = MagicMock()
+            mock_chain.invoke.return_value = mock_llm_response
+            mock_prompt.__or__ = MagicMock(return_value=mock_chain)
+            mock_prompt_factory.return_value = mock_prompt
+            mock_llm_factory.return_value = MagicMock()
+
+            compiled = build_graph(analyzer_fn=_make_fake_analyzer("ACADEMIC_QUERY"))
+            result = compiled.invoke(_base_state(question="test q"))
+
+        self.assertEqual(result["intent"], "ACADEMIC_QUERY")
+        self.assertEqual(result["context"], "Some curriculum context.")
+        self.assertEqual(result["answer"], "Grounded answer from LLM.")
+        self.assertEqual(result["student_id"], "24CSE001")
+
+
+class TestReviewerIntegrationInGraph(unittest.TestCase):
+    """Verify that the real reviewer is integrated and invoked by the graph."""
+
+    def setUp(self) -> None:
+        _execution_log.clear()
+
+    def test_reviewer_node_delegates_to_review_response(self) -> None:
+        """Verify reviewer_node calls review_response."""
+        from unittest.mock import patch
+        test_state = _base_state(intent="GENERAL", answer="Hello there")
+        with patch("agents.graph.review_response", return_value={"mocked": True}) as mock_rr:
+            result = reviewer_node(test_state)
+            mock_rr.assert_called_once_with(test_state)
+            self.assertEqual(result, {"mocked": True})
+
+    def test_academic_query_with_valid_evidence_preserves_answer(self) -> None:
+        """ACADEMIC_QUERY with valid context, sources, and answer is preserved by reviewer in graph."""
+        from unittest.mock import MagicMock, patch
+        from agents.reviewer import FALLBACK_ACADEMIC
+
+        fake_retrieval = {
+            "found": True,
+            "context": "Passing grade is 40% in each subject.",
+            "sources": [{"document": "exam_rules.pdf", "page": 4, "score": 0.95}],
+            "query": "What is the passing grade?",
+            "filters": {},
+            "best_score": 0.95,
+        }
+        mock_llm_response = MagicMock()
+        mock_llm_response.content = "The minimum passing grade is 40% according to institutional rules."
+
+        with patch("agents.graph.retrieve_context", return_value=fake_retrieval), \
+             patch("agents.graph.get_student_profile", return_value=None), \
+             patch("agents.graph.get_groq_llm") as mock_llm_factory, \
+             patch("agents.graph.get_rag_chat_prompt") as mock_prompt_factory:
+
+            mock_prompt = MagicMock()
+            mock_chain = MagicMock()
+            mock_chain.invoke.return_value = mock_llm_response
+            mock_prompt.__or__ = MagicMock(return_value=mock_chain)
+            mock_prompt_factory.return_value = mock_prompt
+            mock_llm_factory.return_value = MagicMock()
+
+            compiled = build_graph(analyzer_fn=_make_fake_analyzer("ACADEMIC_QUERY"))
+            result = compiled.invoke(_base_state(question="What is the passing grade?"))
+
+        self.assertEqual(result["intent"], "ACADEMIC_QUERY")
+        self.assertEqual(result["context"], "Passing grade is 40% in each subject.")
+        self.assertEqual(len(result["sources"]), 1)
+        self.assertEqual(result["answer"], "The minimum passing grade is 40% according to institutional rules.")
+        self.assertNotEqual(result["answer"], FALLBACK_ACADEMIC)
+
+    def test_academic_query_missing_context_or_sources_triggers_fallback(self) -> None:
+        """When RAG retrieval finds no context, reviewer replaces answer with FALLBACK_ACADEMIC."""
+        from unittest.mock import patch
+        from agents.reviewer import FALLBACK_ACADEMIC
+
+        fake_retrieval = {
+            "found": False,
+            "context": "",
+            "sources": [],
+            "query": "Unknown topic",
+            "filters": {},
+            "best_score": None,
+        }
+
+        with patch("agents.graph.retrieve_context", return_value=fake_retrieval), \
+             patch("agents.graph.get_student_profile", return_value=None):
+
+            compiled = build_graph(analyzer_fn=_make_fake_analyzer("ACADEMIC_QUERY"))
+            result = compiled.invoke(_base_state(question="Unknown topic"))
+
+        self.assertEqual(result["intent"], "ACADEMIC_QUERY")
+        self.assertEqual(result["answer"], FALLBACK_ACADEMIC)
+
+    def test_academic_query_with_answer_but_missing_sources_triggers_fallback(self) -> None:
+        """If RAG node produced an answer and context but sources is empty, reviewer falls back."""
+        from agents.reviewer import FALLBACK_ACADEMIC
+
+        ungrounded_state = _base_state(
+            intent="ACADEMIC_QUERY",
+            context="Some context",
+            sources=[],
+            answer="Invented claim",
+        )
+        result = reviewer_node(ungrounded_state)
+        self.assertEqual(result["answer"], FALLBACK_ACADEMIC)
+
+    def test_non_academic_routes_handled_by_reviewer(self) -> None:
+        """Non-academic routes receive appropriate fallbacks from reviewer."""
+        from agents.reviewer import (
+            FALLBACK_CGPA,
+            FALLBACK_GENERAL,
+            FALLBACK_SCHEDULE,
+            FALLBACK_STUDY_PLAN,
+        )
+
+        for intent, expected_fallback in [
+            ("CGPA", FALLBACK_CGPA),
+            ("STUDY_PLAN", FALLBACK_STUDY_PLAN),
+            ("SCHEDULE", FALLBACK_SCHEDULE),
+            ("GENERAL", FALLBACK_GENERAL),
+        ]:
+            with self.subTest(intent=intent):
+                compiled = build_graph(analyzer_fn=_make_fake_analyzer(intent))
+                result = compiled.invoke(_base_state(question="test"))
+                self.assertEqual(result["intent"], intent)
+                self.assertEqual(result["answer"], expected_fallback)
+
+
 if __name__ == "__main__":
     unittest.main()
+

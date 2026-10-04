@@ -1323,5 +1323,206 @@ class TestGeneralNodeIntegration(unittest.TestCase):
             self.assertEqual(result["answer"], "Sure, here is the answer.")
 
 
+class TestRunAgent(unittest.TestCase):
+    """Tests for the public run_agent entry point."""
+
+    def setUp(self) -> None:
+        _execution_log.clear()
+
+    def test_run_agent_academic_query(self) -> None:
+        # Patch the global agent_graph to a deterministic version
+        from agents.graph import build_graph, run_agent
+        from unittest.mock import MagicMock, patch
+        # Prepare a fake analyzer for ACADEMIC_QUERY
+        fake_analyzer = _make_fake_analyzer("ACADEMIC_QUERY")
+        compiled = build_graph(analyzer_fn=fake_analyzer)
+        # Mock LLM chain to return a deterministic answer
+        mock_llm_response = MagicMock()
+        mock_llm_response.content = "Mocked academic answer"
+        # Patch get_groq_llm and get_rag_chat_prompt to avoid real calls
+        with patch("agents.graph.get_groq_llm", return_value=MagicMock()):
+            with patch("agents.graph.get_rag_chat_prompt") as mock_prompt_factory:
+                mock_prompt = MagicMock()
+                mock_chain = MagicMock()
+                mock_chain.invoke.return_value = mock_llm_response
+                mock_prompt.__or__ = MagicMock(return_value=mock_chain)
+                mock_prompt_factory.return_value = mock_prompt
+                # Replace the global agent_graph temporarily
+                with patch("agents.graph.agent_graph", compiled):
+                    result = run_agent("24CSE001", "What is the subject list?")
+        self.assertIn("answer", result)
+        self.assertIn("intent", result)
+        self.assertIn("sources", result)
+        self.assertIn("tool_result", result)
+        self.assertEqual(result["intent"], "ACADEMIC_QUERY")
+        self.assertEqual(result["answer"], "Mocked academic answer")
+
+    def test_run_agent_invalid_student_id(self) -> None:
+        from agents.graph import run_agent
+        with self.assertRaises(ValueError):
+            run_agent("", "Some question")
+        with self.assertRaises(ValueError):
+            run_agent("   ", "Some question")
+        with self.assertRaises(ValueError):
+            run_agent(None, "Some question")
+
+    def test_run_agent_invalid_question(self) -> None:
+        from agents.graph import run_agent
+        with self.assertRaises(ValueError):
+            run_agent("24CSE001", "")
+        with self.assertRaises(ValueError):
+            run_agent("24CSE001", "   ")
+        with self.assertRaises(ValueError):
+            run_agent("24CSE001", None)
+
+class TestRunAgent(unittest.TestCase):
+    """Tests for the public run_agent entry point."""
+
+    def setUp(self) -> None:
+        _execution_log.clear()
+
+    def test_run_agent_academic_query(self) -> None:
+        # Patch the global agent_graph to a deterministic version
+        from agents.graph import build_graph, run_agent
+        from unittest.mock import MagicMock, patch
+        # Prepare a fake analyzer for ACADEMIC_QUERY
+        fake_analyzer = _make_fake_analyzer("ACADEMIC_QUERY")
+        compiled = build_graph(analyzer_fn=fake_analyzer)
+        # Mock LLM chain to return a deterministic answer
+        mock_llm_response = MagicMock()
+        mock_llm_response.content = "Mocked academic answer"
+        # Patch get_groq_llm and get_rag_chat_prompt to avoid real calls
+        with patch("agents.graph.get_groq_llm", return_value=MagicMock()):
+            with patch("agents.graph.get_rag_chat_prompt") as mock_prompt_factory:
+                mock_prompt = MagicMock()
+                mock_chain = MagicMock()
+                mock_chain.invoke.return_value = mock_llm_response
+                mock_prompt.__or__ = MagicMock(return_value=mock_chain)
+                mock_prompt_factory.return_value = mock_prompt
+                # Replace the global agent_graph temporarily
+                with patch("agents.graph.agent_graph", compiled):
+                    result = run_agent("24CSE001", "What is the subject list?")
+        self.assertIn("answer", result)
+        self.assertIn("intent", result)
+        self.assertIn("sources", result)
+        self.assertIn("tool_result", result)
+        self.assertEqual(result["intent"], "ACADEMIC_QUERY")
+        self.assertEqual(result["answer"], "Mocked academic answer")
+
+    def test_run_agent_invalid_student_id(self) -> None:
+        from agents.graph import run_agent
+        with self.assertRaises(ValueError):
+            run_agent("", "Some question")
+        with self.assertRaises(ValueError):
+            run_agent("   ", "Some question")
+        with self.assertRaises(ValueError):
+            run_agent(None, "Some question")
+
+    def test_run_agent_invalid_question(self) -> None:
+        from agents.graph import run_agent
+        with self.assertRaises(ValueError):
+            run_agent("24CSE001", "")
+        with self.assertRaises(ValueError):
+            run_agent("24CSE001", "   ")
+        with self.assertRaises(ValueError):
+            run_agent("24CSE001", None)
+
+    def test_run_agent_valid_cgpa(self) -> None:
+        from agents.graph import build_graph, run_agent, get_student_profile
+        from unittest.mock import patch
+        fake_analyzer = _make_fake_analyzer("CGPA")
+        compiled = build_graph(analyzer_fn=fake_analyzer)
+        fake_profile = {"student_id": "24CSE001", "name": "Test", "cgpa": 9.1}
+        with patch("agents.graph.get_student_profile", return_value=fake_profile):
+            with patch("agents.graph.agent_graph", compiled):
+                result = run_agent("24CSE001", "What is my CGPA?")
+        self.assertEqual(result["intent"], "CGPA")
+        self.assertIsInstance(result["tool_result"], dict)
+        self.assertEqual(result["tool_result"]["cgpa"], 9.1)
+
+    def test_run_agent_valid_schedule(self) -> None:
+        from agents.graph import build_graph, run_agent, get_student_profile
+        from unittest.mock import MagicMock, patch
+        fake_analyzer = _make_fake_analyzer("SCHEDULE")
+        compiled = build_graph(analyzer_fn=fake_analyzer)
+        def fake_schedule_node(state):
+            state["tool_result"] = {"ok": True, "detail": "mocked schedule"}
+            state["answer"] = "Schedule result"
+            return state
+        with patch("agents.graph.schedule_node", side_effect=fake_schedule_node):
+            with patch("agents.graph.get_student_profile", return_value={"student_id": "24CSE001"}):
+                with patch("agents.graph.agent_graph", compiled):
+                    result = run_agent("24CSE001", "Show my timetable")
+        self.assertEqual(result["intent"], "SCHEDULE")
+        self.assertIn("tool_result", result)
+        self.assertTrue(result["tool_result"]["ok"])
+
+    def test_run_agent_valid_study_plan(self) -> None:
+        from agents.graph import build_graph, run_agent, get_student_profile
+        from unittest.mock import MagicMock, patch
+        fake_analyzer = _make_fake_analyzer("STUDY_PLAN")
+        compiled = build_graph(analyzer_fn=fake_analyzer)
+        def fake_study_plan_node(state):
+            state["tool_result"] = {"ok": True, "plan": []}
+            state["answer"] = "Study plan generated"
+            return state
+        with patch("agents.graph.study_plan_node", side_effect=fake_study_plan_node):
+            with patch("agents.graph.get_student_profile", return_value={"student_id": "24CSE001"}):
+                with patch("agents.graph.agent_graph", compiled):
+                    result = run_agent("24CSE001", "Create a study plan")
+        self.assertEqual(result["intent"], "STUDY_PLAN")
+        self.assertIn("tool_result", result)
+        self.assertTrue(result["tool_result"]["ok"])
+
+    def test_run_agent_valid_general(self) -> None:
+        from agents.graph import build_graph, run_agent, get_groq_llm, get_general_chat_prompt
+        from unittest.mock import MagicMock, patch
+        fake_analyzer = _make_fake_analyzer("GENERAL")
+        compiled = build_graph(analyzer_fn=fake_analyzer)
+        mock_llm_response = MagicMock()
+        mock_llm_response.content = "General answer"
+        with patch("agents.graph.get_groq_llm", return_value=MagicMock()):
+            with patch("agents.graph.get_general_chat_prompt") as mock_prompt_factory:
+                mock_prompt = MagicMock()
+                mock_chain = MagicMock()
+                mock_chain.invoke.return_value = mock_llm_response
+                mock_prompt.__or__ = MagicMock(return_value=mock_chain)
+                mock_prompt_factory.return_value = mock_prompt
+                with patch("agents.graph.agent_graph", compiled):
+                    result = run_agent("24CSE001", "How are you?")
+        self.assertEqual(result["intent"], "GENERAL")
+        self.assertIn("answer", result)
+        self.assertEqual(result["answer"], "General answer")
+
+    def test_run_agent_response_shape(self) -> None:
+        from agents.graph import build_graph, run_agent
+        from unittest.mock import MagicMock, patch
+        fake_analyzer = _make_fake_analyzer("GENERAL")
+        compiled = build_graph(analyzer_fn=fake_analyzer)
+        mock_llm_response = MagicMock()
+        mock_llm_response.content = "Shape answer"
+        with patch("agents.graph.get_groq_llm", return_value=MagicMock()):
+            with patch("agents.graph.get_general_chat_prompt") as mock_prompt_factory:
+                mock_prompt = MagicMock()
+                mock_chain = MagicMock()
+                mock_chain.invoke.return_value = mock_llm_response
+                mock_prompt.__or__ = MagicMock(return_value=mock_chain)
+                mock_prompt_factory.return_value = mock_prompt
+                with patch("agents.graph.agent_graph", compiled):
+                    result = run_agent("24CSE001", "Test shape")
+        self.assertEqual(set(result.keys()), {"answer", "intent", "sources", "tool_result"})
+        self.assertNotIn("question", result)
+        self.assertNotIn("student_id", result)
+
+    def test_run_agent_does_not_bypass_graph(self) -> None:
+        from agents.graph import run_agent, agent_graph
+        from unittest.mock import MagicMock, patch
+        mock_graph = MagicMock()
+        mock_graph.invoke.return_value = {"answer": "ok", "intent": "GENERAL", "sources": [], "tool_result": None}
+        with patch("agents.graph.agent_graph", mock_graph):
+            result = run_agent("24CSE001", "Hello")
+        mock_graph.invoke.assert_called_once()
+        self.assertIn("answer", result)
+
 if __name__ == "__main__":
     unittest.main()

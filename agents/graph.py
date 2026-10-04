@@ -717,3 +717,33 @@ def build_graph(
 # For tests, call build_graph() with a deterministic analyzer_fn.
 
 agent_graph = build_graph()
+
+def run_agent(student_id: str, question: str) -> dict:
+    """Public entry point for Phase‑1 CampusAI agent.
+
+    Args:
+        student_id: Identifier of the student (e.g., "24CSE001").
+        question: User's question string.
+
+    Returns:
+        A dictionary with at least the keys ``answer``, ``intent``, ``sources``
+        and ``tool_result`` taken from the final ``AgentState`` produced by the
+        compiled ``agent_graph``.
+
+    Raises:
+        ValueError: If ``student_id`` or ``question`` is ``None``, empty, or
+            contains only whitespace.
+    """
+    if student_id is None or not str(student_id).strip():
+        raise ValueError("student_id must be a non‑empty string")
+    if question is None or not str(question).strip():
+        raise ValueError("question must be a non‑empty string")
+
+    init_state = {"student_id": student_id, "question": question}
+    final_state = agent_graph.invoke(init_state)
+    return {
+        "answer": final_state.get("answer", ""),
+        "intent": final_state.get("intent", ""),
+        "sources": final_state.get("sources", []),
+        "tool_result": final_state.get("tool_result"),
+    }

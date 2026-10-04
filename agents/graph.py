@@ -35,7 +35,8 @@ from agents.state import AgentState
 from llm.groq import get_groq_llm
 from rag.prompts import NOT_FOUND_MESSAGE, get_rag_chat_prompt
 from rag.retriever import retrieve_context
-from student.registry import StudentNotFoundError, get_student_profile
+from student.registry import RegistryError, StudentNotFoundError, get_student_profile
+from tools.cgpa import GradeError, calculate_cgpa, calculate_sgpa
 
 # ---------------------------------------------------------------------------
 # Route identifier → graph node name mapping
@@ -113,7 +114,74 @@ def study_plan_node(state: AgentState) -> AgentState:
 
 
 def cgpa_node(state: AgentState) -> AgentState:
-    """Placeholder for CGPA capability. Returns state unchanged."""
+    """Deterministic CGPA/SGPA capability node.
+
+    1. Obtains the student ID from state['student_id'].
+    2. If explicit calculation inputs (semesters or courses) are provided,
+       invokes calculate_cgpa or calculate_sgpa.
+    3. Otherwise, looks up the student's profile via get_student_profile.
+    4. Stores the resulting tool output in state['tool_result'].
+    5. Produces a user-facing answer in state['answer'].
+    6. Preserves student_id, question, and intent.
+    """
+    student_id = state.get("student_id", "")
+
+    # Multi-semester CGPA calculation input
+    if "semesters" in state and state["semesters"]:
+        try:
+            res = calculate_cgpa(state["semesters"])
+            state["tool_result"] = res
+            state["answer"] = f"Calculated CGPA is {res['cgpa']}. {res.get('formula', '')}"
+            return state
+        except GradeError as e:
+            state["tool_result"] = {"ok": False, "error": str(e)}
+            state["answer"] = f"Could not calculate CGPA: {e}"
+            return state
+
+    # Course-level SGPA calculation input
+    if "courses" in state and state["courses"]:
+        try:
+            res = calculate_sgpa(state["courses"])
+            state["tool_result"] = res
+            state["answer"] = f"Calculated SGPA is {res['sgpa']}. {res.get('formula', '')}"
+            return state
+        except GradeError as e:
+            state["tool_result"] = {"ok": False, "error": str(e)}
+            state["answer"] = f"Could not calculate SGPA: {e}"
+            return state
+
+    # Standard CGPA lookup via student registry
+    if not student_id:
+        state["tool_result"] = {"ok": False, "error": "Missing student ID"}
+        state["answer"] = "Could not retrieve CGPA because no student ID was provided."
+        return state
+
+    try:
+        profile = get_student_profile(student_id)
+    except StudentNotFoundError as e:
+        state["tool_result"] = {"ok": False, "error": str(e)}
+        state["answer"] = f"Could not retrieve CGPA: student ID '{student_id}' was not found in the registry."
+        return state
+    except RegistryError as e:
+        state["tool_result"] = {"ok": False, "error": str(e)}
+        state["answer"] = f"Could not retrieve CGPA due to registry error: {e}"
+        return state
+
+    cgpa_val = profile.get("cgpa")
+    if cgpa_val is None:
+        state["tool_result"] = {"ok": False, "error": f"No CGPA on record for student {student_id}"}
+        state["answer"] = f"No CGPA record was found for student ID '{student_id}'."
+        return state
+
+    name = profile.get("name", student_id)
+    sem = profile.get("semester")
+
+    state["tool_result"] = {
+        "ok": True,
+        **profile,
+    }
+    sem_text = f" in Semester {sem}" if sem else ""
+    state["answer"] = f"Student {name} ({profile.get('student_id', student_id)}) has a current CGPA of {cgpa_val}{sem_text}."
     return state
 
 

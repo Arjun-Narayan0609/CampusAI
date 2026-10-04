@@ -561,11 +561,6 @@ class TestOtherRoutesUnchanged(unittest.TestCase):
         result = study_plan_node(state)
         self.assertIs(result, state)
 
-    def test_cgpa_still_passthrough(self) -> None:
-        state = _base_state()
-        result = cgpa_node(state)
-        self.assertIs(result, state)
-
     def test_schedule_still_passthrough(self) -> None:
         state = _base_state()
         result = schedule_node(state)
@@ -745,16 +740,14 @@ class TestReviewerIntegrationInGraph(unittest.TestCase):
         self.assertEqual(result["answer"], FALLBACK_ACADEMIC)
 
     def test_non_academic_routes_handled_by_reviewer(self) -> None:
-        """Non-academic routes receive appropriate fallbacks from reviewer."""
+        """Remaining placeholder routes receive appropriate fallbacks from reviewer."""
         from agents.reviewer import (
-            FALLBACK_CGPA,
             FALLBACK_GENERAL,
             FALLBACK_SCHEDULE,
             FALLBACK_STUDY_PLAN,
         )
 
         for intent, expected_fallback in [
-            ("CGPA", FALLBACK_CGPA),
             ("STUDY_PLAN", FALLBACK_STUDY_PLAN),
             ("SCHEDULE", FALLBACK_SCHEDULE),
             ("GENERAL", FALLBACK_GENERAL),
@@ -764,6 +757,136 @@ class TestReviewerIntegrationInGraph(unittest.TestCase):
                 result = compiled.invoke(_base_state(question="test"))
                 self.assertEqual(result["intent"], intent)
                 self.assertEqual(result["answer"], expected_fallback)
+
+    def test_cgpa_missing_tool_result_triggers_fallback_in_reviewer(self) -> None:
+        """When CGPA state is missing tool_result, reviewer applies FALLBACK_CGPA."""
+        from agents.reviewer import FALLBACK_CGPA
+        state = _base_state(intent="CGPA", tool_result=None, answer="Unsupported answer")
+        result = reviewer_node(state)
+        self.assertEqual(result["answer"], FALLBACK_CGPA)
+
+
+class TestCgpaNodeIntegration(unittest.TestCase):
+    """Focused integration tests for the deterministic CGPA capability node."""
+
+    def setUp(self) -> None:
+        _execution_log.clear()
+
+    def test_valid_cgpa_query_from_profile(self) -> None:
+        """1. VALID CGPA QUERY: Look up student profile, populate tool_result and answer, preserve core fields."""
+        from unittest.mock import patch
+
+        fake_profile = {
+            "student_id": "24CSE001",
+            "name": "Aarav Shetty",
+            "department": "CSE",
+            "semester": 5,
+            "year": 3,
+            "cgpa": 8.42,
+        }
+        with patch("agents.graph.get_student_profile", return_value=fake_profile) as mock_p:
+            state = _base_state(student_id="24CSE001", question="What is my CGPA?", intent="CGPA")
+            result = cgpa_node(state)
+
+            mock_p.assert_called_once_with("24CSE001")
+            self.assertIsNotNone(result.get("tool_result"))
+            self.assertTrue(result["tool_result"]["ok"])
+            self.assertEqual(result["tool_result"]["cgpa"], 8.42)
+            self.assertEqual(result["tool_result"]["student_id"], "24CSE001")
+            self.assertIsNotNone(result.get("answer"))
+            self.assertIn("8.42", result["answer"])
+            self.assertIn("Aarav Shetty", result["answer"])
+            # Core state fields preserved
+            self.assertEqual(result["student_id"], "24CSE001")
+            self.assertEqual(result["question"], "What is my CGPA?")
+            self.assertEqual(result["intent"], "CGPA")
+
+    def test_unknown_student_handled_gracefully(self) -> None:
+        """2. UNKNOWN STUDENT: Registry raises StudentNotFoundError, node does not crash, no CGPA fabricated."""
+        from unittest.mock import patch
+        from student.registry import StudentNotFoundError
+
+        with patch("agents.graph.get_student_profile", side_effect=StudentNotFoundError("Unknown student ID: 'UNKNOWN999'")):
+            state = _base_state(student_id="UNKNOWN999", question="What is my CGPA?", intent="CGPA")
+            result = cgpa_node(state)
+
+            self.assertIsNotNone(result.get("tool_result"))
+            self.assertFalse(result["tool_result"]["ok"])
+            self.assertIn("error", result["tool_result"])
+            self.assertIn("not found", result["answer"].lower())
+            # Ensure no numeric CGPA was fabricated
+            self.assertNotIn("8.", result["answer"])
+            self.assertNotIn("9.", result["answer"])
+            self.assertEqual(result["student_id"], "UNKNOWN999")
+            self.assertEqual(result["question"], "What is my CGPA?")
+            self.assertEqual(result["intent"], "CGPA")
+
+    def test_missing_student_id_handled_gracefully(self) -> None:
+        """Unknown/missing student ID in state produces bounded error in tool_result and answer."""
+        state = _base_state(student_id="", question="What is my CGPA?", intent="CGPA")
+        result = cgpa_node(state)
+        self.assertFalse(result["tool_result"]["ok"])
+        self.assertIn("Missing student ID", result["tool_result"]["error"])
+        self.assertIn("no student id", result["answer"].lower())
+
+    def test_cgpa_tool_result_propagation_semesters(self) -> None:
+        """3. TOOL RESULT PROPAGATION: Exact deterministic result from calculate_cgpa reaches tool_result."""
+        from tools.cgpa import calculate_cgpa
+
+        semesters = [
+            {"semester": 1, "sgpa": 8.0, "credits": 20},
+            {"semester": 2, "sgpa": 9.0, "credits": 10},
+        ]
+        expected = calculate_cgpa(semesters)
+
+        state = _base_state(student_id="24CSE001", intent="CGPA", semesters=semesters)
+        result = cgpa_node(state)
+
+        self.assertEqual(result["tool_result"], expected)
+        self.assertIn(str(expected["cgpa"]), result["answer"])
+
+    def test_sgpa_tool_result_propagation_courses(self) -> None:
+        """3. TOOL RESULT PROPAGATION: Exact deterministic result from calculate_sgpa reaches tool_result."""
+        from tools.cgpa import calculate_sgpa
+
+        courses = [
+            {"subject": "Maths", "grade": "A", "credits": 4},
+            {"subject": "Physics", "grade": "B+", "credits": 3},
+            {"subject": "Chemistry", "grade": "O", "credits": 3},
+            {"subject": "Workshop", "grade": "C", "credits": 2},
+        ]
+        expected = calculate_sgpa(courses)
+
+        state = _base_state(student_id="24CSE001", intent="CGPA", courses=courses)
+        result = cgpa_node(state)
+
+        self.assertEqual(result["tool_result"], expected)
+        self.assertIn(str(expected["sgpa"]), result["answer"])
+
+    def test_full_graph_routing_cgpa(self) -> None:
+        """4. FULL GRAPH ROUTING: Graph with CGPA intent reaches cgpa_node and reviewer preserves valid answer."""
+        compiled = build_graph(analyzer_fn=_make_fake_analyzer("CGPA"))
+        result = compiled.invoke(_base_state(student_id="24CSE001", question="What is my CGPA?"))
+
+        self.assertEqual(result["intent"], "CGPA")
+        self.assertIsNotNone(result.get("tool_result"))
+        self.assertTrue(result["tool_result"]["ok"])
+        self.assertEqual(result["tool_result"]["cgpa"], 8.42)
+        self.assertIn("8.42", result["answer"])
+        self.assertEqual(result["student_id"], "24CSE001")
+
+    def test_full_graph_routing_unknown_student(self) -> None:
+        """4. FULL GRAPH ROUTING: Unknown student passes through cgpa_node to reviewer without crash."""
+        from unittest.mock import patch
+        from student.registry import StudentNotFoundError
+
+        with patch("agents.graph.get_student_profile", side_effect=StudentNotFoundError("Unknown student ID: 'UNKNOWN'")):
+            compiled = build_graph(analyzer_fn=_make_fake_analyzer("CGPA"))
+            result = compiled.invoke(_base_state(student_id="UNKNOWN", question="What is my CGPA?"))
+
+        self.assertEqual(result["intent"], "CGPA")
+        self.assertFalse(result["tool_result"]["ok"])
+        self.assertIn("not found", result["answer"].lower())
 
 
 if __name__ == "__main__":

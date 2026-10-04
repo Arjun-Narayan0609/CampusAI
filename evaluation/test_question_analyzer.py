@@ -111,6 +111,34 @@ class TestQuestionAnalyzerUnit(unittest.TestCase):
         self.assertEqual(VALID_INTENTS, expected)
 
 
+    def test_semantic_classification_mocked_cases(self):
+        """Test the 9 required semantic classification cases with mocked structured output."""
+        required_cases = [
+            ("What is normalization in DBMS?", "ACADEMIC_QUERY"),
+            ("Explain normalization in DBMS from my notes.", "ACADEMIC_QUERY"),
+            ("What is the three schema architecture in DBMS?", "ACADEMIC_QUERY"),
+            ("Explain functional and non-functional requirements in Software Engineering.", "ACADEMIC_QUERY"),
+            ("What is Docker?", "GENERAL"),
+            ("Tell me a joke.", "GENERAL"),
+            ("Create a study plan for me.", "STUDY_PLAN"),
+            ("What is my CGPA?", "CGPA"),
+            ("Show my schedule.", "SCHEDULE"),
+        ]
+
+        for question, expected_intent in required_cases:
+            with self.subTest(intent=expected_intent, question=question):
+                mock_llm = self._create_mock_llm(expected_intent)
+                state: AgentState = {
+                    "student_id": "24CSE001",
+                    "question": question,
+                }
+                updated_state = analyze_question(state, llm=mock_llm)
+                self.assertEqual(updated_state["intent"], expected_intent)
+
+                direct_intent = classify_question_intent(question, llm=mock_llm)
+                self.assertEqual(direct_intent, expected_intent)
+
+
 class TestQuestionAnalyzerLive(unittest.TestCase):
     """Live integration tests against Groq if GROQ_API_KEY is available."""
 
@@ -137,6 +165,26 @@ class TestQuestionAnalyzerLive(unittest.TestCase):
             ("What classes do I have tomorrow morning?", "SCHEDULE"),
             ("Move my study session from Wednesday to Friday.", "SCHEDULE"),
             ("Hello, how are you doing today?", "GENERAL"),
+        ]
+
+        for question, expected in scenarios:
+            with self.subTest(question=question, expected=expected):
+                state: AgentState = {"student_id": "24CSE001", "question": question}
+                result = analyze_question(state)
+                self.assertEqual(result["intent"], expected)
+
+    def test_live_groq_required_semantic_cases(self):
+        """Test live model with the 9 required semantic classification test cases."""
+        scenarios = [
+            ("What is normalization in DBMS?", "ACADEMIC_QUERY"),
+            ("Explain normalization in DBMS from my notes.", "ACADEMIC_QUERY"),
+            ("What is the three schema architecture in DBMS?", "ACADEMIC_QUERY"),
+            ("Explain functional and non-functional requirements in Software Engineering.", "ACADEMIC_QUERY"),
+            ("What is Docker?", "GENERAL"),
+            ("Tell me a joke.", "GENERAL"),
+            ("Create a study plan for me.", "STUDY_PLAN"),
+            ("What is my CGPA?", "CGPA"),
+            ("Show my schedule.", "SCHEDULE"),
         ]
 
         for question, expected in scenarios:

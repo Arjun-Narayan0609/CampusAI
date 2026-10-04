@@ -556,11 +556,6 @@ class TestOtherRoutesUnchanged(unittest.TestCase):
     def setUp(self) -> None:
         _execution_log.clear()
 
-    def test_study_plan_still_passthrough(self) -> None:
-        state = _base_state()
-        result = study_plan_node(state)
-        self.assertIs(result, state)
-
     def test_general_still_passthrough(self) -> None:
         state = _base_state()
         result = general_node(state)
@@ -736,13 +731,9 @@ class TestReviewerIntegrationInGraph(unittest.TestCase):
 
     def test_non_academic_routes_handled_by_reviewer(self) -> None:
         """Remaining placeholder routes receive appropriate fallbacks from reviewer."""
-        from agents.reviewer import (
-            FALLBACK_GENERAL,
-            FALLBACK_STUDY_PLAN,
-        )
+        from agents.reviewer import FALLBACK_GENERAL
 
         for intent, expected_fallback in [
-            ("STUDY_PLAN", FALLBACK_STUDY_PLAN),
             ("GENERAL", FALLBACK_GENERAL),
         ]:
             with self.subTest(intent=intent):
@@ -750,6 +741,13 @@ class TestReviewerIntegrationInGraph(unittest.TestCase):
                 result = compiled.invoke(_base_state(question="test"))
                 self.assertEqual(result["intent"], intent)
                 self.assertEqual(result["answer"], expected_fallback)
+
+    def test_study_plan_missing_tool_result_triggers_fallback_in_reviewer(self) -> None:
+        """When STUDY_PLAN state is missing tool_result, reviewer applies FALLBACK_STUDY_PLAN."""
+        from agents.reviewer import FALLBACK_STUDY_PLAN
+        state = _base_state(intent="STUDY_PLAN", tool_result=None, answer="Unsupported answer")
+        result = reviewer_node(state)
+        self.assertEqual(result["answer"], FALLBACK_STUDY_PLAN)
 
     def test_cgpa_missing_tool_result_triggers_fallback_in_reviewer(self) -> None:
         """When CGPA state is missing tool_result, reviewer applies FALLBACK_CGPA."""
@@ -1036,6 +1034,168 @@ class TestScheduleNodeIntegration(unittest.TestCase):
         self.assertFalse(result["tool_result"]["ok"])
         self.assertIn("not found", result["answer"].lower())
         self.assertNotIn("session(s) scheduled", result["answer"])
+
+
+class TestStudyPlanNodeIntegration(unittest.TestCase):
+    """Focused integration tests for the deterministic Study Plan capability node."""
+
+    def setUp(self) -> None:
+        _execution_log.clear()
+
+    def test_study_plan_node_valid_request(self) -> None:
+        """1. test_study_plan_node_valid_request: Valid study-plan request invokes planner, populates tool_result and answer, preserves state."""
+        from datetime import date
+        state = _base_state(
+            student_id="24CSE001",
+            question="Make me a study plan for my exams",
+            intent="STUDY_PLAN",
+            today=date(2026, 10, 5),
+            persist=False,
+        )
+        result = study_plan_node(state)
+
+        self.assertEqual(result["student_id"], "24CSE001")
+        self.assertEqual(result["question"], "Make me a study plan for my exams")
+        self.assertEqual(result["intent"], "STUDY_PLAN")
+        self.assertIsNotNone(result.get("tool_result"))
+        self.assertTrue(result["tool_result"].get("ok"))
+        self.assertGreater(len(result["tool_result"]["plan"]), 0)
+        self.assertIn("session(s)", result["answer"])
+
+    def test_study_plan_node_unknown_student(self) -> None:
+        """2. test_study_plan_node_unknown_student: Unknown student is handled safely without crashing or fabricating a plan."""
+        state = _base_state(
+            student_id="UNKNOWN_STUDENT_999",
+            question="Create a study schedule",
+            intent="STUDY_PLAN",
+        )
+        result = study_plan_node(state)
+
+        self.assertIsNotNone(result.get("tool_result"))
+        self.assertFalse(result["tool_result"]["ok"])
+        self.assertIn("not found", result["tool_result"]["error"].lower())
+        self.assertIn("no profile found", result["answer"].lower())
+        self.assertNotIn("Generated a study plan", result["answer"])
+
+    def test_study_plan_tool_result_propagation(self) -> None:
+        """3. test_study_plan_tool_result_propagation: Exact result returned by deterministic planner reaches state['tool_result']."""
+        from unittest.mock import patch
+
+        mock_plan = {
+            "tool": "create_study_plan",
+            "student_id": "24CSE001",
+            "generated_for": "2026-10-05",
+            "feasible": True,
+            "plan": [
+                {
+                    "id": 101,
+                    "subject": "Operating Systems",
+                    "date": "2026-10-06",
+                    "start_time": "18:00",
+                    "duration_min": 60,
+                }
+            ],
+            "per_subject": [
+                {
+                    "subject": "Operating Systems",
+                    "exam_date": "2026-11-20",
+                    "sessions": 1,
+                    "total_minutes": 60,
+                }
+            ],
+            "warnings": [],
+        }
+
+        with patch("agents.graph.create_study_plan", return_value=mock_plan) as mock_csp, \
+             patch("agents.graph.validate_plan", return_value=[]):
+            state = _base_state(
+                student_id="24CSE001",
+                intent="STUDY_PLAN",
+                question="Create my study plan",
+            )
+            result = study_plan_node(state)
+
+            mock_csp.assert_called_once()
+            self.assertEqual(result["tool_result"]["plan"], mock_plan["plan"])
+            self.assertEqual(result["tool_result"]["issues"], [])
+            self.assertIn("Operating Systems", result["tool_result"]["plan"][0]["subject"])
+            self.assertIn("Operating Systems", result["answer"])
+
+    def test_study_plan_validation(self) -> None:
+        """4. test_study_plan_validation: Existing validate_plan() behavior is respected and issues are recorded."""
+        from unittest.mock import patch
+
+        mock_plan = {
+            "tool": "create_study_plan",
+            "student_id": "24CSE001",
+            "generated_for": "2026-10-05",
+            "feasible": False,
+            "plan": [{"id": 1, "subject": "DBMS", "date": "2026-10-06", "start_time": "18:00", "duration_min": 60}],
+            "per_subject": [],
+            "warnings": [],
+        }
+        with patch("agents.graph.create_study_plan", return_value=mock_plan), \
+             patch("agents.graph.validate_plan", return_value=["2026-10-06: overlapping sessions"]):
+            state = _base_state(student_id="24CSE001", intent="STUDY_PLAN", question="Plan studies")
+            result = study_plan_node(state)
+
+            self.assertEqual(result["tool_result"]["issues"], ["2026-10-06: overlapping sessions"])
+            self.assertIn("validation issues", result["answer"].lower())
+            self.assertIn("overlapping sessions", result["answer"])
+            self.assertNotIn("Generated a study plan with", result["answer"])
+
+    def test_study_plan_failure_handled_safely(self) -> None:
+        """5. test_study_plan_failure_handled_safely: Expected planner failure is handled safely without false success."""
+        from unittest.mock import patch
+        from student.registry import RegistryError
+
+        with patch("agents.graph.create_study_plan", side_effect=RegistryError("Registry CSV corrupted")):
+            state = _base_state(student_id="24CSE001", intent="STUDY_PLAN", question="Make a plan")
+            result = study_plan_node(state)
+
+            self.assertIsNotNone(result.get("tool_result"))
+            self.assertFalse(result["tool_result"]["ok"])
+            self.assertIn("Registry CSV corrupted", result["tool_result"]["error"])
+            self.assertIn("Could not access student profile data", result["answer"])
+            self.assertNotIn("Generated a study plan", result["answer"])
+
+    def test_full_graph_routing_study_plan(self) -> None:
+        """6. test_full_graph_routing_study_plan: Graph with intent='STUDY_PLAN' routes to study_plan_node and reviewer approves."""
+        from unittest.mock import patch
+
+        mock_plan = {
+            "tool": "create_study_plan",
+            "student_id": "24CSE001",
+            "generated_for": "2026-10-05",
+            "feasible": True,
+            "plan": [{"id": 1, "subject": "DBMS", "date": "2026-10-06", "start_time": "18:00", "duration_min": 60}],
+            "per_subject": [{"subject": "DBMS", "exam_date": "2026-11-16", "sessions": 1, "total_minutes": 60}],
+            "warnings": [],
+        }
+        with patch("agents.graph.create_study_plan", return_value=mock_plan), \
+             patch("agents.graph.validate_plan", return_value=[]):
+            compiled = build_graph(analyzer_fn=_make_fake_analyzer("STUDY_PLAN"))
+            result = compiled.invoke(_base_state(student_id="24CSE001", question="Make me a study plan"))
+
+        self.assertEqual(result["intent"], "STUDY_PLAN")
+        self.assertIsNotNone(result.get("tool_result"))
+        self.assertTrue(result["tool_result"]["ok"])
+        self.assertIn("Generated a study plan", result["answer"])
+        self.assertEqual(result["student_id"], "24CSE001")
+
+    def test_full_graph_unknown_student_study_plan(self) -> None:
+        """7. test_full_graph_unknown_student_study_plan: Unknown student request reaches reviewer safely with no hallucinated plan."""
+        from unittest.mock import patch
+        from student.registry import StudentNotFoundError
+
+        with patch("agents.graph.create_study_plan", side_effect=StudentNotFoundError("Unknown student ID: 'UNKNOWN'")):
+            compiled = build_graph(analyzer_fn=_make_fake_analyzer("STUDY_PLAN"))
+            result = compiled.invoke(_base_state(student_id="UNKNOWN", question="Make me a study plan"))
+
+        self.assertEqual(result["intent"], "STUDY_PLAN")
+        self.assertFalse(result["tool_result"]["ok"])
+        self.assertIn("no profile found", result["answer"].lower())
+        self.assertNotIn("Generated a study plan", result["answer"])
 
 
 if __name__ == "__main__":

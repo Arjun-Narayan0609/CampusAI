@@ -39,6 +39,11 @@ from rag.prompts import NOT_FOUND_MESSAGE, get_rag_chat_prompt
 from rag.retriever import retrieve_context
 from student.registry import RegistryError, StudentNotFoundError, get_student_profile
 from tools.cgpa import GradeError, calculate_cgpa, calculate_sgpa
+from tools.planner import (
+    create_study_plan,
+    reschedule_unavailable_day,
+    validate_plan,
+)
 from tools.scheduler import (
     ScheduleConflictError,
     ScheduleError,
@@ -126,7 +131,147 @@ def rag_node(state: AgentState) -> AgentState:
 
 
 def study_plan_node(state: AgentState) -> AgentState:
-    """Placeholder for Study Plan capability. Returns state unchanged."""
+    """Deterministic Study Plan capability node.
+
+    Invokes Member 3's deterministic study planner (create_study_plan),
+    validates the generated plan (validate_plan), and derives a grounded,
+    user-facing answer strictly from the planner output.
+    """
+    student_id = state.get("student_id")
+    question = state.get("question", "")
+    q_lower = question.lower()
+    metadata = state.get("metadata") or {}
+
+    if not student_id or not str(student_id).strip():
+        state["tool_result"] = {"ok": False, "error": "Missing student ID"}
+        state["answer"] = "Student ID is required to generate a study plan."
+        return state
+
+    # Extract optional planner parameters if provided in state/metadata
+    today = state.get("today") or metadata.get("today")
+    if isinstance(today, str):
+        try:
+            today = date.fromisoformat(today)
+        except ValueError:
+            today = None
+
+    persist = state.get("persist")
+    if persist is None:
+        persist = metadata.get("persist", True)
+
+    weights = state.get("weights") or metadata.get("weights")
+    blocked_dates = state.get("blocked_dates") or metadata.get("blocked_dates")
+    action = state.get("action") or metadata.get("action")
+
+    # Check for reschedule unavailable day action / keywords
+    if action == "reschedule_unavailable_day" or any(kw in q_lower for kw in ("cannot study", "unavailable", "can't study")):
+        target_date = state.get("unavailable_date") or metadata.get("unavailable_date")
+        if not target_date:
+            iso_match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", question)
+            if iso_match:
+                try:
+                    target_date = date.fromisoformat(iso_match.group(1))
+                except ValueError:
+                    target_date = None
+            else:
+                for wd in WEEKDAYS:
+                    if re.search(rf"\b{wd}\b", q_lower):
+                        try:
+                            target_date = resolve_weekday(wd)
+                        except ScheduleError:
+                            target_date = None
+                        break
+
+        if target_date is None:
+            state["tool_result"] = {"ok": False, "error": "Missing date to mark unavailable"}
+            state["answer"] = "Please specify which date or weekday you cannot study (e.g., 'I cannot study Wednesday' or '2026-10-07')."
+            return state
+
+        try:
+            res = reschedule_unavailable_day(student_id, target_date, today=today)
+            res.setdefault("ok", True)
+            state["tool_result"] = res
+            strategy = res.get("strategy", "unknown")
+            dropped = res.get("sessions_dropped", 0)
+            date_str = target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)
+            if strategy == "moved":
+                state["answer"] = f"Rescheduled study sessions away from {date_str} into free slots on other days (0 sessions dropped)."
+            else:
+                state["answer"] = f"Replanned your study timetable with {date_str} marked unavailable ({dropped} session(s) dropped)."
+            return state
+        except StudentNotFoundError:
+            state["tool_result"] = {"ok": False, "error": f"Student '{student_id}' not found in registry"}
+            state["answer"] = f"No profile found for student ID '{student_id}'. Cannot reschedule study plan."
+            return state
+        except RegistryError as e:
+            state["tool_result"] = {"ok": False, "error": str(e)}
+            state["answer"] = f"Could not access student profile data: {e}"
+            return state
+        except (ScheduleError, SessionNotFoundError) as e:
+            state["tool_result"] = {"ok": False, "error": str(e)}
+            state["answer"] = f"Scheduling error while rescheduling: {e}"
+            return state
+        except ValueError as e:
+            state["tool_result"] = {"ok": False, "error": str(e)}
+            state["answer"] = f"Invalid date or parameter for rescheduling: {e}"
+            return state
+
+    # Primary workflow: generate deterministic study plan
+    try:
+        plan = create_study_plan(
+            student_id=student_id,
+            today=today,
+            persist=persist,
+            weights=weights,
+            blocked_dates=blocked_dates,
+        )
+    except StudentNotFoundError:
+        state["tool_result"] = {"ok": False, "error": f"Student '{student_id}' not found in registry"}
+        state["answer"] = f"No profile found for student ID '{student_id}'. Cannot generate a study plan."
+        return state
+    except RegistryError as e:
+        state["tool_result"] = {"ok": False, "error": str(e)}
+        state["answer"] = f"Could not access student profile data: {e}"
+        return state
+    except (ScheduleError, SessionNotFoundError) as e:
+        state["tool_result"] = {"ok": False, "error": str(e)}
+        state["answer"] = f"Scheduling error while generating study plan: {e}"
+        return state
+    except ValueError as e:
+        state["tool_result"] = {"ok": False, "error": str(e)}
+        state["answer"] = f"Invalid date or parameter for study plan: {e}"
+        return state
+
+    # Validate the generated plan using Member 3's validate_plan
+    issues = validate_plan(plan)
+    plan["issues"] = issues
+    plan.setdefault("ok", True)
+    state["tool_result"] = plan
+
+    sessions = plan.get("plan", [])
+    per_subject = plan.get("per_subject", [])
+    warnings = plan.get("warnings", [])
+    feasible = plan.get("feasible", True)
+
+    if issues:
+        state["answer"] = f"Study plan generated with validation issues: {'; '.join(issues)}."
+    elif not sessions:
+        if warnings:
+            state["answer"] = f"Could not generate study plan: {warnings[0]}"
+        else:
+            state["answer"] = "No study sessions could be scheduled based on your current exam dates and profile."
+    else:
+        first_date = sessions[0]["date"]
+        last_date = sessions[-1]["date"]
+        subj_count = len(per_subject)
+        sess_count = len(sessions)
+        subj_label = f" ({', '.join(p['subject'] for p in per_subject[:3])}{'...' if len(per_subject) > 3 else ''})" if per_subject else ""
+        if not feasible and warnings:
+            warn_msg = warnings[-1]
+            state["answer"] = f"Generated a study plan with {sess_count} session(s) across {subj_count} subject(s){subj_label} from {first_date} to {last_date}. Note: {warn_msg}"
+        else:
+            state["answer"] = f"Generated a study plan with {sess_count} session(s) across {subj_count} subject(s){subj_label} from {first_date} to {last_date}."
+
     return state
 
 

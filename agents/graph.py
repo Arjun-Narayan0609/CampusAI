@@ -28,10 +28,13 @@ import re
 from datetime import date
 from typing import Callable
 
+from groq import GroqError
+from langchain_core.exceptions import LangChainException
+from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, START, StateGraph
 
 from agents.question_analyzer import analyze_question
-from agents.reviewer import review_response
+from agents.reviewer import FALLBACK_GENERAL, review_response
 from agents.router import route_question
 from agents.state import AgentState
 from llm.groq import get_groq_llm
@@ -599,8 +602,51 @@ def schedule_node(state: AgentState) -> AgentState:
     return state
 
 
+# ---------------------------------------------------------------------------
+# General capability node and prompt
+# ---------------------------------------------------------------------------
+
+GENERAL_SYSTEM_PROMPT = """You are CampusAI, an academic assistant for students.
+Answer general, conversational, or non-academic inquiries directly, politely, and concisely.
+
+Rules:
+1. Identify as CampusAI when appropriate.
+2. Answer the user's question directly and concisely.
+3. You do not have access to private student records or institutional documents in this general mode. Never invent or fabricate grades, CGPA, schedules, study plans, or institutional policies.
+4. If the user asks for personal academic data (such as CGPA, timetable/schedule, or study plan) or institutional regulations, guide them to ask specifically for those services so CampusAI can route to the appropriate academic tool or official documents.
+5. Do not make claims about access to information that was not provided."""
+
+
+def get_general_chat_prompt() -> ChatPromptTemplate:
+    """Chat prompt template for GENERAL inquiries."""
+    return ChatPromptTemplate.from_messages([
+        ("system", GENERAL_SYSTEM_PROMPT),
+        ("human", "{question}"),
+    ])
+
+
 def general_node(state: AgentState) -> AgentState:
-    """Placeholder for General capability. Returns state unchanged."""
+    """General conversation and assistance capability node.
+
+    Handles basic conversational questions, greetings, and general inquiries
+    that do not require institutional documents (RAG) or student academic tools.
+    Uses the project's existing Groq LLM infrastructure.
+    """
+    question = state.get("question", "")
+
+    if not question or not str(question).strip():
+        state["answer"] = "Hello! I am CampusAI, your academic assistant. How can I help you today?"
+        return state
+
+    try:
+        llm = get_groq_llm()
+        prompt = get_general_chat_prompt()
+        chain = prompt | llm
+        response = chain.invoke({"question": question})
+        state["answer"] = response.content if hasattr(response, "content") else str(response)
+    except (GroqError, LangChainException, ValueError):
+        state["answer"] = FALLBACK_GENERAL
+
     return state
 
 

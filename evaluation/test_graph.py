@@ -225,12 +225,17 @@ class TestGeneralRouting(unittest.TestCase):
         _execution_log.clear()
 
     def test_general_reaches_general_and_reviewer(self) -> None:
-        compiled = _build_tracked_graph("GENERAL")
-        result = compiled.invoke(_base_state())
-        self.assertIn("general", _execution_log)
-        self.assertNotIn("rag", _execution_log)
-        self.assertIn("reviewer", _execution_log)
-        self.assertEqual(result["intent"], "GENERAL")
+        from unittest.mock import MagicMock, patch
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="Hello")
+        mock_llm.return_value = MagicMock(content="Hello")
+        with patch("agents.graph.get_groq_llm", return_value=mock_llm):
+            compiled = _build_tracked_graph("GENERAL")
+            result = compiled.invoke(_base_state())
+            self.assertIn("general", _execution_log)
+            self.assertNotIn("rag", _execution_log)
+            self.assertIn("reviewer", _execution_log)
+            self.assertEqual(result["intent"], "GENERAL")
 
 
 # ===========================================================================
@@ -245,9 +250,14 @@ class TestStatePreservation(unittest.TestCase):
         _execution_log.clear()
 
     def test_student_id_preserved(self) -> None:
-        compiled = _build_tracked_graph("GENERAL")
-        result = compiled.invoke(_base_state(student_id="24CSE042"))
-        self.assertEqual(result["student_id"], "24CSE042")
+        from unittest.mock import MagicMock, patch
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="Hello")
+        mock_llm.return_value = MagicMock(content="Hello")
+        with patch("agents.graph.get_groq_llm", return_value=mock_llm):
+            compiled = _build_tracked_graph("GENERAL")
+            result = compiled.invoke(_base_state(student_id="24CSE042"))
+            self.assertEqual(result["student_id"], "24CSE042")
 
     def test_question_preserved(self) -> None:
         compiled = _build_tracked_graph("ACADEMIC_QUERY")
@@ -282,26 +292,31 @@ class TestReviewerExecution(unittest.TestCase):
 
     def test_reviewer_runs_after_every_branch(self) -> None:
         """All five capability branches must end with the reviewer."""
-        for intent, expected_node in [
-            ("ACADEMIC_QUERY", "rag"),
-            ("STUDY_PLAN", "study_plan"),
-            ("CGPA", "cgpa"),
-            ("SCHEDULE", "schedule"),
-            ("GENERAL", "general"),
-        ]:
-            with self.subTest(intent=intent):
-                _execution_log.clear()
-                compiled = _build_tracked_graph(intent)
-                compiled.invoke(_base_state())
-                self.assertIn(expected_node, _execution_log)
-                self.assertIn("reviewer", _execution_log)
-                # Reviewer must execute AFTER the capability node
-                cap_idx = _execution_log.index(expected_node)
-                rev_idx = _execution_log.index("reviewer")
-                self.assertGreater(
-                    rev_idx, cap_idx,
-                    f"Reviewer should execute after {expected_node}"
-                )
+        from unittest.mock import MagicMock, patch
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="Mock response")
+        mock_llm.return_value = MagicMock(content="Mock response")
+        with patch("agents.graph.get_groq_llm", return_value=mock_llm):
+            for intent, expected_node in [
+                ("ACADEMIC_QUERY", "rag"),
+                ("STUDY_PLAN", "study_plan"),
+                ("CGPA", "cgpa"),
+                ("SCHEDULE", "schedule"),
+                ("GENERAL", "general"),
+            ]:
+                with self.subTest(intent=intent):
+                    _execution_log.clear()
+                    compiled = _build_tracked_graph(intent)
+                    compiled.invoke(_base_state())
+                    self.assertIn(expected_node, _execution_log)
+                    self.assertIn("reviewer", _execution_log)
+                    # Reviewer must execute AFTER the capability node
+                    cap_idx = _execution_log.index(expected_node)
+                    rev_idx = _execution_log.index("reviewer")
+                    self.assertGreater(
+                        rev_idx, cap_idx,
+                        f"Reviewer should execute after {expected_node}"
+                    )
 
 
 # ===========================================================================
@@ -550,16 +565,7 @@ class TestRagNodeStudentProfileFilters(unittest.TestCase):
         self.assertEqual(result["sources"], [])
 
 
-class TestOtherRoutesUnchanged(unittest.TestCase):
-    """TEST 5: Non-RAG routes remain placeholder pass-throughs."""
 
-    def setUp(self) -> None:
-        _execution_log.clear()
-
-    def test_general_still_passthrough(self) -> None:
-        state = _base_state()
-        result = general_node(state)
-        self.assertIs(result, state)
 
 
 class TestRagNodeInGraph(unittest.TestCase):
@@ -729,18 +735,12 @@ class TestReviewerIntegrationInGraph(unittest.TestCase):
         result = reviewer_node(ungrounded_state)
         self.assertEqual(result["answer"], FALLBACK_ACADEMIC)
 
-    def test_non_academic_routes_handled_by_reviewer(self) -> None:
-        """Remaining placeholder routes receive appropriate fallbacks from reviewer."""
+    def test_general_missing_answer_triggers_fallback_in_reviewer(self) -> None:
+        """When GENERAL state is missing an answer, reviewer applies FALLBACK_GENERAL."""
         from agents.reviewer import FALLBACK_GENERAL
-
-        for intent, expected_fallback in [
-            ("GENERAL", FALLBACK_GENERAL),
-        ]:
-            with self.subTest(intent=intent):
-                compiled = build_graph(analyzer_fn=_make_fake_analyzer(intent))
-                result = compiled.invoke(_base_state(question="test"))
-                self.assertEqual(result["intent"], intent)
-                self.assertEqual(result["answer"], expected_fallback)
+        state = _base_state(intent="GENERAL", answer=None)
+        result = reviewer_node(state)
+        self.assertEqual(result["answer"], FALLBACK_GENERAL)
 
     def test_study_plan_missing_tool_result_triggers_fallback_in_reviewer(self) -> None:
         """When STUDY_PLAN state is missing tool_result, reviewer applies FALLBACK_STUDY_PLAN."""
@@ -1196,6 +1196,131 @@ class TestStudyPlanNodeIntegration(unittest.TestCase):
         self.assertFalse(result["tool_result"]["ok"])
         self.assertIn("no profile found", result["answer"].lower())
         self.assertNotIn("Generated a study plan", result["answer"])
+
+
+class TestGeneralNodeIntegration(unittest.TestCase):
+    """Focused integration tests for the General capability node."""
+
+    def setUp(self) -> None:
+        _execution_log.clear()
+
+    def test_general_node_valid_question(self) -> None:
+        """1. test_general_node_valid_question: GENERAL produces a response, populates answer, preserves state."""
+        from unittest.mock import MagicMock, patch
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="Hello! I am CampusAI. How can I help you today?")
+        mock_llm.return_value = MagicMock(content="Hello! I am CampusAI. How can I help you today?")
+
+        with patch("agents.graph.get_groq_llm", return_value=mock_llm):
+            state = _base_state(
+                student_id="24CSE001",
+                question="Hello, who are you?",
+                intent="GENERAL",
+            )
+            result = general_node(state)
+
+            self.assertEqual(result["student_id"], "24CSE001")
+            self.assertEqual(result["question"], "Hello, who are you?")
+            self.assertEqual(result["intent"], "GENERAL")
+            self.assertIn("CampusAI", result["answer"])
+
+    def test_general_node_uses_existing_llm(self) -> None:
+        """2. test_general_node_uses_existing_llm: Node uses the project's existing get_groq_llm() path."""
+        from unittest.mock import MagicMock, patch
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="I can help with that.")
+        mock_llm.return_value = MagicMock(content="I can help with that.")
+
+        with patch("agents.graph.get_groq_llm", return_value=mock_llm) as mock_get_llm:
+            state = _base_state(intent="GENERAL", question="Can you help me?")
+            general_node(state)
+
+            mock_get_llm.assert_called_once()
+
+    def test_general_node_does_not_use_rag(self) -> None:
+        """3. test_general_node_does_not_use_rag: retrieve_context() is not called for GENERAL."""
+        from unittest.mock import MagicMock, patch
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="Good morning!")
+        mock_llm.return_value = MagicMock(content="Good morning!")
+
+        with patch("agents.graph.retrieve_context") as mock_retrieve, \
+             patch("agents.graph.get_groq_llm", return_value=mock_llm):
+            state = _base_state(intent="GENERAL", question="Good morning")
+            general_node(state)
+
+            mock_retrieve.assert_not_called()
+
+    def test_general_node_does_not_use_member3_tools(self) -> None:
+        """4. test_general_node_does_not_use_member3_tools: Member 3 tools are not called for GENERAL."""
+        from unittest.mock import MagicMock, patch
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="Hi!")
+        mock_llm.return_value = MagicMock(content="Hi!")
+
+        with patch("agents.graph.calculate_cgpa") as mock_cgpa, \
+             patch("agents.graph.calculate_sgpa") as mock_sgpa, \
+             patch("agents.graph.create_study_plan") as mock_planner, \
+             patch("agents.graph.get_schedule") as mock_schedule, \
+             patch("agents.graph.get_groq_llm", return_value=mock_llm):
+            state = _base_state(intent="GENERAL", question="Hi there")
+            general_node(state)
+
+            mock_cgpa.assert_not_called()
+            mock_sgpa.assert_not_called()
+            mock_planner.assert_not_called()
+            mock_schedule.assert_not_called()
+
+    def test_general_node_failure_handled_safely(self) -> None:
+        """5. test_general_node_failure_handled_safely: Expected LLM failure produces fallback without crashing or false success."""
+        from unittest.mock import patch
+        from groq import GroqError
+        from agents.reviewer import FALLBACK_GENERAL
+
+        with patch("agents.graph.get_groq_llm", side_effect=GroqError("Groq service unavailable")):
+            state = _base_state(intent="GENERAL", question="Tell me a joke")
+            result = general_node(state)
+
+            self.assertEqual(result["answer"], FALLBACK_GENERAL)
+            reviewed = reviewer_node(result)
+            self.assertEqual(reviewed["answer"], FALLBACK_GENERAL)
+
+    def test_full_graph_routing_general(self) -> None:
+        """6. test_full_graph_routing_general: Graph with intent='GENERAL' routes to general_node and reviewer approves."""
+        from unittest.mock import MagicMock, patch
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="Hello! How can I assist you today?")
+        mock_llm.return_value = MagicMock(content="Hello! How can I assist you today?")
+
+        with patch("agents.graph.get_groq_llm", return_value=mock_llm):
+            compiled = build_graph(analyzer_fn=_make_fake_analyzer("GENERAL"))
+            result = compiled.invoke(_base_state(student_id="24CSE001", question="Hi CampusAI!"))
+
+            self.assertEqual(result["intent"], "GENERAL")
+            self.assertEqual(result["answer"], "Hello! How can I assist you today?")
+            self.assertEqual(result["student_id"], "24CSE001")
+
+    def test_general_preserves_sources_and_context(self) -> None:
+        """7. test_general_preserves_sources_and_context: Node does not overwrite existing context/sources."""
+        from unittest.mock import MagicMock, patch
+        mock_sources = [{"document": "guide.pdf", "page": 1}]
+        mock_context = "Institutional curriculum snippet"
+        mock_llm = MagicMock()
+        mock_llm.invoke.return_value = MagicMock(content="Sure, here is the answer.")
+        mock_llm.return_value = MagicMock(content="Sure, here is the answer.")
+
+        with patch("agents.graph.get_groq_llm", return_value=mock_llm):
+            state = _base_state(
+                intent="GENERAL",
+                question="What should I do?",
+                context=mock_context,
+                sources=mock_sources,
+            )
+            result = general_node(state)
+
+            self.assertEqual(result["context"], mock_context)
+            self.assertEqual(result["sources"], mock_sources)
+            self.assertEqual(result["answer"], "Sure, here is the answer.")
 
 
 if __name__ == "__main__":

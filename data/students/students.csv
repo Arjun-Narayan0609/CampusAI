@@ -1,5 +1,6 @@
-student_id,name,department,semester,year,cgpa
-STU001,Alex Rivera,Computer Science,4,2,8.45
-STU002,Beatriz Chen,Information Technology,6,3,9.12
-STU003,Charlie Das,Electronics and Communication,2,1,7.80
-STU004,Devon Patel,Computer Science,8,4,8.90
+student_id,name,department,semester,year,cgpa,subjects,exam_dates,available_hours_per_day,study_start,rest_day,block_minutes
+24CSE001,Aarav Shetty,CSE,5,3,8.42,Database Management Systems|Computer Networks|Operating Systems|Design and Analysis of Algorithms|Software Engineering,Database Management Systems:2026-11-16|Computer Networks:2026-11-18|Operating Systems:2026-11-20|Design and Analysis of Algorithms:2026-11-23|Software Engineering:2026-11-25,3,18:00,Sunday,60
+24CSE002,Diya Rao,CSE,5,3,7.85,Database Management Systems|Computer Networks|Operating Systems|Design and Analysis of Algorithms|Software Engineering,Database Management Systems:2026-11-16|Computer Networks:2026-11-18|Operating Systems:2026-11-20|Design and Analysis of Algorithms:2026-11-23|Software Engineering:2026-11-25,2,17:30,Saturday,60
+24ISE003,Kabir Naik,ISE,3,2,8.91,Data Structures|Discrete Mathematics|Digital Logic Design|Object Oriented Programming,Data Structures:2026-11-17|Discrete Mathematics:2026-11-19|Digital Logic Design:2026-11-21|Object Oriented Programming:2026-11-24,4,19:00,Sunday,90
+24ECE004,Meera Pai,ECE,1,1,7.10,Engineering Mathematics|Engineering Physics|Basic Electronics|Programming in C,Engineering Mathematics:2026-11-17|Engineering Physics:2026-11-19|Basic Electronics:2026-11-22|Programming in C:2026-11-24,2.5,16:00,,60
+24CSE005,Rohan Bhat,CSE,7,4,7.20,Machine Learning|Cloud Computing|Information Security,Machine Learning:2026-10-12|Cloud Computing:2026-10-14|Information Security:2026-10-16,1.5,20:00,,60

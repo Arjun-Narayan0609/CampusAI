@@ -1,0 +1,2 @@
+langchain-core>=0.3   # only needed for tools/langchain_tools.py
+pytest>=8             # only needed to run the tests

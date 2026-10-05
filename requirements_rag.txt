@@ -1,0 +1,5 @@
+pymupdf>=1.24
+chromadb>=0.5
+sentence-transformers>=3.0
+langchain-text-splitters>=0.2
+reportlab>=4.0   # only for scripts/make_synthetic_docs.py
